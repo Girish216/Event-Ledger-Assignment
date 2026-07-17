@@ -4,10 +4,10 @@ COPY .mvn/ .mvn/
 COPY mvnw pom.xml ./
 COPY account-service/pom.xml account-service/pom.xml
 COPY event-gateway/pom.xml event-gateway/pom.xml
-RUN chmod +x mvnw && ./mvnw -q -pl account-service -am dependency:go-offline
+RUN chmod +x mvnw
 
 COPY account-service/src account-service/src
-RUN ./mvnw -q -pl account-service -am package -DskipTests
+RUN ./mvnw -q -pl account-service -Dmaven.test.skip=true package
 
 FROM eclipse-temurin:21-jre
 RUN apt-get update && apt-get install -y --no-install-recommends curl \

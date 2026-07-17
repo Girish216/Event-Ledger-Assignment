@@ -113,11 +113,11 @@ docker compose up --build
 This builds both services and starts them together, Gateway on `:8080`, Account Service on `:8081`,
 with the Gateway waiting on the Account Service's health check before it starts.
 
-> Note: the Docker setup was authored and reviewed carefully (multi-stage build, LF-normalized
-> wrapper scripts via `.gitattributes`, health-checked startup ordering) but couldn't be executed
-> end-to-end in the environment this was built in, since Docker wasn't available there. The Maven
-> build, all automated tests, and the full request flow were verified by running both services
-> directly with `java -jar` instead — see below.
+Verified end-to-end against real containers: both come up `healthy`; idempotent submission,
+out-of-order balance correctness, and chronological listing all behave correctly over the real
+Docker network; stopping the `account-service` container makes the Gateway return `503` on
+`POST /events` and on the balance proxy while `GET /events/{id}` keeps working — then everything
+recovers cleanly once `account-service` is started again.
 
 ## Running manually
 

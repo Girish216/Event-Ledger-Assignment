@@ -4,10 +4,16 @@ COPY .mvn/ .mvn/
 COPY mvnw pom.xml ./
 COPY account-service/pom.xml account-service/pom.xml
 COPY event-gateway/pom.xml event-gateway/pom.xml
-RUN chmod +x mvnw && ./mvnw -q -pl event-gateway -am dependency:go-offline
+RUN chmod +x mvnw && ./mvnw -q -N install
+
+# event-gateway declares a test-scope dependency on account-service (used only by its
+# in-process end-to-end test), so account-service has to be built and installed to the
+# local repo before event-gateway's own dependencies can resolve.
+COPY account-service/src account-service/src
+RUN ./mvnw -q -pl account-service -Dmaven.test.skip=true install
 
 COPY event-gateway/src event-gateway/src
-RUN ./mvnw -q -pl event-gateway -am package -DskipTests
+RUN ./mvnw -q -pl event-gateway -Dmaven.test.skip=true package
 
 FROM eclipse-temurin:21-jre
 RUN apt-get update && apt-get install -y --no-install-recommends curl \

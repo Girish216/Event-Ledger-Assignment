@@ -72,6 +72,18 @@
             <version>3.9.1</version>
             <scope>test</scope>
         </dependency>
+        <!--
+            Test-only: lets the full-flow integration test boot a real Account Service
+            instance in-process instead of mocking it. Does not affect the runtime
+            artifact - each service still ships and runs as an independent process
+            with its own database.
+        -->
+        <dependency>
+            <groupId>com.eventledger</groupId>
+            <artifactId>account-service</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

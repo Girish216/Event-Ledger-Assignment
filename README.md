@@ -159,10 +159,12 @@ Runs both modules' test suites (21 tests total):
   outage, a trace-propagation test, and a full integration test that runs a real Gateway against a
   real (in-process) Account Service with no mocking on either side.
 
-## Example request
+## Example requests and responses
+
+Submit a new event:
 
 ```
-curl -X POST http://localhost:8080/events \
+curl -i -X POST http://localhost:8080/events \
   -H "Content-Type: application/json" \
   -d '{
     "eventId": "evt-001",
@@ -173,4 +175,77 @@ curl -X POST http://localhost:8080/events \
     "eventTimestamp": "2026-05-15T14:02:11Z",
     "metadata": { "source": "mainframe-batch", "batchId": "B-9042" }
   }'
+```
+
+```
+HTTP/1.1 201 Created
+
+{
+  "eventId": "evt-001",
+  "accountId": "acct-123",
+  "type": "CREDIT",
+  "amount": 150.00,
+  "currency": "USD",
+  "eventTimestamp": "2026-05-15T14:02:11Z",
+  "metadata": { "source": "mainframe-batch", "batchId": "B-9042" },
+  "status": "PROCESSED",
+  "receivedAt": "2026-07-17T00:50:49.522101Z",
+  "processedAt": "2026-07-17T00:50:50.339128Z",
+  "failureReason": null,
+  "duplicate": false
+}
+```
+
+Submit the exact same `eventId` again — no duplicate event, no balance change, `200` instead of `201`:
+
+```
+HTTP/1.1 200 OK
+
+{ "...": "same event as above", "duplicate": true }
+```
+
+Check the balance (this is `sum(CREDIT) - sum(DEBIT)`, order-independent):
+
+```
+curl http://localhost:8080/accounts/acct-123/balance
+```
+```json
+{ "accountId": "acct-123", "balance": 150.00, "currency": "USD", "asOf": "2026-07-17T00:51:16.366Z" }
+```
+
+List events for an account — always chronological by `eventTimestamp`, regardless of the order they
+were submitted in:
+
+```
+curl "http://localhost:8080/events?account=acct-123"
+```
+
+If the Account Service is stopped and you retry the `POST /events` call above:
+
+```
+HTTP/1.1 503 Service Unavailable
+
+{
+  "timestamp": "2026-07-17T00:56:29.079981300Z",
+  "status": 503,
+  "error": "Service Unavailable",
+  "message": "Account Service is unreachable",
+  "path": "/events"
+}
+```
+
+...while `GET /events/{id}` and `GET /events?account=` on the same Gateway keep returning `200`,
+since they only read the Gateway's own database.
+
+## Example test run
+
+```
+./mvnw test
+...
+[INFO] Results:
+[INFO]
+[INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0   -- account-service
+[INFO] Tests run: 14, Failures: 0, Errors: 0, Skipped: 0  -- event-gateway
+[INFO]
+[INFO] BUILD SUCCESS
 ```

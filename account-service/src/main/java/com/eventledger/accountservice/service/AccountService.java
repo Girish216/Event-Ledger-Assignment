@@ -52,6 +52,8 @@ public class AccountService {
         try {
             ApplyResult result = transactionApplier.apply(accountId, request);
             meterRegistry.counter("account.transactions.applied", "type", request.type().name()).increment();
+            log.info("transaction applied eventId={} accountId={} type={} balance={}",
+                    request.eventId(), accountId, request.type(), result.account().getBalance());
             return TransactionResponse.from(result.transaction(), result.account().getBalance(), false);
         } catch (DataIntegrityViolationException ex) {
             AccountTransaction raced = transactionRepository.findByEventId(request.eventId())

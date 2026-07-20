@@ -1,6 +1,7 @@
 package com.eventledger.eventgateway.exception;
 
 import com.eventledger.eventgateway.dto.ErrorResponse;
+import com.fasterxml.jackson.databind.exc.InvalidFormatException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -31,6 +32,21 @@ public class GlobalExceptionHandler {
         return error(HttpStatus.SERVICE_UNAVAILABLE, "Account Service is unreachable", request);
     }
 
+    @ExceptionHandler(ConflictingDuplicateException.class)
+    public ResponseEntity<ErrorResponse> handleConflictingDuplicate(ConflictingDuplicateException ex, HttpServletRequest request) {
+        return error(HttpStatus.CONFLICT, ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(AccountServiceConflictException.class)
+    public ResponseEntity<ErrorResponse> handleAccountServiceConflict(AccountServiceConflictException ex, HttpServletRequest request) {
+        return error(HttpStatus.CONFLICT, ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(AccountServiceValidationException.class)
+    public ResponseEntity<ErrorResponse> handleAccountServiceValidation(AccountServiceValidationException ex, HttpServletRequest request) {
+        return error(HttpStatus.BAD_REQUEST, ex.getMessage(), request);
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ErrorResponse> handleValidation(MethodArgumentNotValidException ex, HttpServletRequest request) {
         String message = ex.getBindingResult().getFieldErrors().stream()
@@ -41,7 +57,35 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ErrorResponse> handleUnreadable(HttpMessageNotReadableException ex, HttpServletRequest request) {
+        // getMostSpecificCause() walks past InvalidFormatException down to the raw parser
+        // exception (e.g. DateTimeParseException), losing the field name it carries - so look
+        // for InvalidFormatException specifically instead of taking the deepest cause.
+        InvalidFormatException formatEx = findCause(ex, InvalidFormatException.class);
+        if (formatEx != null && !formatEx.getPath().isEmpty()) {
+            String field = formatEx.getPath().get(formatEx.getPath().size() - 1).getFieldName();
+            String message = field + ": invalid value '" + formatEx.getValue() + "', expected " + expectedTypeHint(formatEx.getTargetType());
+            return error(HttpStatus.BAD_REQUEST, message, request);
+        }
         return error(HttpStatus.BAD_REQUEST, "Malformed request body: " + ex.getMostSpecificCause().getMessage(), request);
+    }
+
+    private static <T extends Throwable> T findCause(Throwable throwable, Class<T> type) {
+        for (Throwable cause = throwable; cause != null; cause = cause.getCause()) {
+            if (type.isInstance(cause)) {
+                return type.cast(cause);
+            }
+        }
+        return null;
+    }
+
+    private static String expectedTypeHint(Class<?> targetType) {
+        if (targetType == Instant.class) {
+            return "an ISO-8601 timestamp, e.g. 2026-05-15T10:00:00Z";
+        }
+        if (targetType != null && targetType.isEnum()) {
+            return "one of " + java.util.Arrays.toString(targetType.getEnumConstants());
+        }
+        return "a valid " + (targetType == null ? "value" : targetType.getSimpleName());
     }
 
     @ExceptionHandler(MissingServletRequestParameterException.class)

@@ -2,7 +2,9 @@ package com.eventledger.eventgateway.client;
 
 import com.eventledger.eventgateway.domain.Event;
 import com.eventledger.eventgateway.exception.AccountNotFoundUpstreamException;
+import com.eventledger.eventgateway.exception.AccountServiceConflictException;
 import com.eventledger.eventgateway.exception.AccountServiceUnavailableException;
+import com.eventledger.eventgateway.exception.AccountServiceValidationException;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,13 +39,28 @@ public class AccountServiceClient {
                     .body(AccountTransactionResult.class);
         } catch (HttpServerErrorException | ResourceAccessException ex) {
             throw new AccountServiceUnavailableException("Account Service call failed: " + ex.getMessage(), ex);
+        } catch (HttpClientErrorException.Conflict ex) {
+            throw new AccountServiceConflictException(messageFrom(ex));
+        } catch (HttpClientErrorException.BadRequest ex) {
+            throw new AccountServiceValidationException(messageFrom(ex));
         } catch (HttpClientErrorException ex) {
             throw new AccountServiceUnavailableException("Account Service rejected the request: " + ex.getMessage(), ex);
         }
     }
 
+    private static String messageFrom(HttpClientErrorException ex) {
+        String body = ex.getResponseBodyAsString();
+        return (body == null || body.isBlank()) ? ex.getMessage() : body;
+    }
+
     @SuppressWarnings("unused")
     private AccountTransactionResult applyTransactionFallback(Event event, Throwable t) {
+        if (t instanceof AccountServiceConflictException conflict) {
+            throw conflict;
+        }
+        if (t instanceof AccountServiceValidationException invalid) {
+            throw invalid;
+        }
         log.warn("account service circuit open or call failed for accountId={} eventId={}: {}",
                 event.getAccountId(), event.getEventId(), t.toString());
         throw new AccountServiceUnavailableException("Account Service is unavailable", t);

@@ -19,7 +19,15 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -38,7 +46,7 @@ class EndToEndIntegrationTest {
         accountServiceContext = new SpringApplicationBuilder(AccountServiceApplication.class)
                 .properties(
                         "server.port=0",
-                        "spring.datasource.url=jdbc:h2:mem:e2e-accountdb;DB_CLOSE_DELAY=-1"
+                        "spring.datasource.url=jdbc:h2:mem:e2e-accountdb;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=15000"
                 )
                 .run();
 
@@ -95,5 +103,42 @@ class EndToEndIntegrationTest {
                 "http://localhost:" + gatewayPort + "/accounts/" + accountId + "/balance", String.class);
         JsonNode balanceAfter = mapper.readTree(balanceAfterDuplicate.getBody());
         assertThat(balanceAfter.get("balance").decimalValue()).isEqualByComparingTo("88.00");
+    }
+
+    @Test
+    void concurrentEventsAgainstTheSameAccountDoNotLoseUpdatesOrFail() throws Exception {
+        String accountId = "acct-e2e-concurrent-" + UUID.randomUUID();
+        int concurrentEvents = 25;
+        BigDecimal amountEach = new BigDecimal("10.00");
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        ExecutorService pool = Executors.newFixedThreadPool(concurrentEvents);
+        try {
+            List<Callable<ResponseEntity<String>>> tasks = new ArrayList<>();
+            for (int i = 0; i < concurrentEvents; i++) {
+                String eventId = "evt-e2e-concurrent-" + i + "-" + UUID.randomUUID();
+                String json = """
+                        {"eventId":"%s","accountId":"%s","type":"CREDIT","amount":%s,"currency":"USD","eventTimestamp":"2026-05-15T10:00:00Z"}
+                        """.formatted(eventId, accountId, amountEach.toPlainString());
+                tasks.add(() -> restTemplate.postForEntity(
+                        "http://localhost:" + gatewayPort + "/events", new HttpEntity<>(json, headers), String.class));
+            }
+
+            List<Future<ResponseEntity<String>>> futures = pool.invokeAll(tasks);
+            for (Future<ResponseEntity<String>> future : futures) {
+                ResponseEntity<String> response = future.get(15, TimeUnit.SECONDS);
+                assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+            }
+        } finally {
+            pool.shutdown();
+        }
+
+        ResponseEntity<String> balanceResponse = restTemplate.getForEntity(
+                "http://localhost:" + gatewayPort + "/accounts/" + accountId + "/balance", String.class);
+        JsonNode balance = mapper.readTree(balanceResponse.getBody());
+        BigDecimal expected = amountEach.multiply(new BigDecimal(concurrentEvents));
+        assertThat(balance.get("balance").decimalValue()).isEqualByComparingTo(expected);
     }
 }

@@ -9,6 +9,8 @@ spring:
     driver-class-name: org.h2.Driver
     username: sa
     password:
+    hikari:
+      maximum-pool-size: 30
   jpa:
     open-in-view: false
     hibernate:
@@ -38,6 +40,8 @@ resilience4j:
         automaticTransitionFromOpenToHalfOpenEnabled: true
         ignoreExceptions:
           - com.eventledger.eventgateway.exception.AccountNotFoundUpstreamException
+          - com.eventledger.eventgateway.exception.AccountServiceConflictException
+          - com.eventledger.eventgateway.exception.AccountServiceValidationException
 
 management:
   endpoints:

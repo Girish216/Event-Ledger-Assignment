@@ -7,10 +7,12 @@ import com.eventledger.accountservice.dto.TransactionRequest;
 import com.eventledger.accountservice.repository.AccountRepository;
 import com.eventledger.accountservice.repository.AccountTransactionRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Optional;
 
 /**
  * Runs the balance update and transaction insert as a single database transaction.
@@ -28,18 +30,43 @@ class TransactionApplier {
         this.transactionRepository = transactionRepository;
     }
 
+    /**
+     * Takes a pessimistic write lock on the account row for the duration of the caller's
+     * transaction, so concurrent transactions against the same account serialize instead of
+     * racing on a stale in-memory balance. Returns empty if the account doesn't exist yet.
+     */
     @Transactional
-    public ApplyResult apply(String accountId, TransactionRequest request) {
-        Instant now = Instant.now();
+    Optional<Account> findAccountForUpdate(String accountId) {
+        return accountRepository.findWithLockByAccountId(accountId);
+    }
 
-        Account account = accountRepository.findById(accountId)
-                .orElseGet(() -> new Account(accountId, request.currency(), now));
+    /**
+     * Ensures an account row exists, creating it with a zero balance if it doesn't. Runs in its
+     * own transaction: if two first-ever transactions for the same brand-new accountId race on
+     * the insert, the loser simply discovers the winner's row already exists instead of failing -
+     * and, being isolated, that race never poisons the caller's transaction. Deliberately doesn't
+     * catch DataIntegrityViolationException here: once a flush fails, Hibernate marks this
+     * transaction rollback-only regardless, so swallowing it here would still surface as
+     * UnexpectedRollbackException at commit. Letting it propagate rolls back this isolated
+     * transaction cleanly; the caller (in its own, unaffected transaction) catches and ignores it.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    void createAccountIfAbsent(String accountId, String currency, Instant at) {
+        if (accountRepository.existsById(accountId)) {
+            return;
+        }
+        accountRepository.saveAndFlush(new Account(accountId, currency, at));
+    }
+
+    @Transactional
+    ApplyResult apply(Account account, String accountId, TransactionRequest request) {
+        Instant now = Instant.now();
 
         BigDecimal delta = request.type() == TransactionType.CREDIT
                 ? request.amount()
                 : request.amount().negate();
         account.applyDelta(delta, now);
-        account = accountRepository.save(account);
+        Account saved = accountRepository.save(account);
 
         AccountTransaction transaction = new AccountTransaction(
                 request.eventId(),
@@ -52,6 +79,6 @@ class TransactionApplier {
         );
         transaction = transactionRepository.save(transaction);
 
-        return new ApplyResult(account, transaction);
+        return new ApplyResult(saved, transaction);
     }
 }

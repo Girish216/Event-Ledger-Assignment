@@ -7,6 +7,8 @@ import com.eventledger.accountservice.dto.BalanceResponse;
 import com.eventledger.accountservice.dto.TransactionRequest;
 import com.eventledger.accountservice.dto.TransactionResponse;
 import com.eventledger.accountservice.exception.AccountNotFoundException;
+import com.eventledger.accountservice.exception.ConflictingDuplicateException;
+import com.eventledger.accountservice.exception.CurrencyMismatchException;
 import com.eventledger.accountservice.exception.EventIdConflictException;
 import com.eventledger.accountservice.repository.AccountRepository;
 import com.eventledger.accountservice.repository.AccountTransactionRepository;
@@ -42,15 +44,42 @@ public class AccountService {
         this.meterRegistry = meterRegistry;
     }
 
+    @Transactional
     public TransactionResponse applyTransaction(String accountId, TransactionRequest request) {
         Optional<AccountTransaction> existing = transactionRepository.findByEventId(request.eventId());
         if (existing.isPresent()) {
             log.info("duplicate transaction eventId={} accountId={}", request.eventId(), accountId);
-            return duplicateResponse(accountId, existing.get());
+            return duplicateResponse(accountId, request, existing.get());
+        }
+
+        // Pessimistic write lock on the account row: concurrent transactions against the same
+        // accountId serialize on this lock for the rest of the transaction, so the balance read
+        // below is never stale by the time it's written back - no lost updates, no retry loop
+        // needed. A lock can only be taken on a row that exists, so a brand-new accountId is
+        // created (if it isn't already there) in its own isolated transaction first - that keeps
+        // a lost creation race between two concurrent first-ever transactions from poisoning this one.
+        Optional<Account> existingAccount = transactionApplier.findAccountForUpdate(accountId);
+        Account account;
+        if (existingAccount.isPresent()) {
+            account = existingAccount.get();
+        } else {
+            try {
+                transactionApplier.createAccountIfAbsent(accountId, request.currency(), Instant.now());
+            } catch (DataIntegrityViolationException raceLost) {
+                // a concurrent request created this account first in its own isolated transaction;
+                // that transaction rolled back cleanly on its own and never touched this one, so
+                // it's safe to just re-read the row it created below
+            }
+            account = transactionApplier.findAccountForUpdate(accountId)
+                    .orElseThrow(() -> new IllegalStateException("account " + accountId + " must exist after createAccountIfAbsent"));
+        }
+
+        if (!account.getCurrency().equals(request.currency())) {
+            throw new CurrencyMismatchException(accountId, account.getCurrency(), request.currency());
         }
 
         try {
-            ApplyResult result = transactionApplier.apply(accountId, request);
+            ApplyResult result = transactionApplier.apply(account, accountId, request);
             meterRegistry.counter("account.transactions.applied", "type", request.type().name()).increment();
             log.info("transaction applied eventId={} accountId={} type={} balance={}",
                     request.eventId(), accountId, request.type(), result.account().getBalance());
@@ -59,19 +88,29 @@ public class AccountService {
             AccountTransaction raced = transactionRepository.findByEventId(request.eventId())
                     .orElseThrow(() -> ex);
             log.info("concurrent duplicate transaction eventId={} accountId={}", request.eventId(), accountId);
-            return duplicateResponse(accountId, raced);
+            return duplicateResponse(accountId, request, raced);
         }
     }
 
-    private TransactionResponse duplicateResponse(String accountId, AccountTransaction existing) {
+    private TransactionResponse duplicateResponse(String accountId, TransactionRequest request, AccountTransaction existing) {
         if (!existing.getAccountId().equals(accountId)) {
             throw new EventIdConflictException(existing.getEventId(), existing.getAccountId(), accountId);
+        }
+        if (!isExactDuplicate(existing, request)) {
+            throw new ConflictingDuplicateException(existing.getEventId());
         }
         meterRegistry.counter("account.transactions.duplicate").increment();
         BigDecimal balance = accountRepository.findById(accountId)
                 .map(Account::getBalance)
                 .orElse(BigDecimal.ZERO);
         return TransactionResponse.from(existing, balance, true);
+    }
+
+    private static boolean isExactDuplicate(AccountTransaction existing, TransactionRequest request) {
+        return existing.getType() == request.type()
+                && existing.getAmount().compareTo(request.amount()) == 0
+                && existing.getCurrency().equals(request.currency())
+                && existing.getEventTimestamp().equals(request.eventTimestamp());
     }
 
     @Transactional(readOnly = true)

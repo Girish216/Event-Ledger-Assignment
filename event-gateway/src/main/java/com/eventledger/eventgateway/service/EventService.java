@@ -8,6 +8,7 @@ import com.eventledger.eventgateway.dto.BalanceResponse;
 import com.eventledger.eventgateway.dto.EventRequest;
 import com.eventledger.eventgateway.dto.EventResponse;
 import com.eventledger.eventgateway.exception.AccountServiceUnavailableException;
+import com.eventledger.eventgateway.exception.ConflictingDuplicateException;
 import com.eventledger.eventgateway.exception.EventNotFoundException;
 import com.eventledger.eventgateway.repository.EventRepository;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -40,16 +41,7 @@ public class EventService {
         Optional<Event> existing = eventRepository.findByEventId(request.eventId());
 
         if (existing.isPresent()) {
-            Event event = existing.get();
-            if (event.getStatus() == EventStatus.PROCESSED) {
-                meterRegistry.counter("events.duplicate").increment();
-                log.info("duplicate event received eventId={} accountId={}", event.getEventId(), event.getAccountId());
-                return EventResponse.from(event, true);
-            }
-            // status is PENDING or FAILED: the transaction was never confirmed as applied, retry it
-            log.info("retrying unresolved event eventId={} accountId={} previousStatus={}",
-                    event.getEventId(), event.getAccountId(), event.getStatus());
-            return process(event, true);
+            return retryOrAcknowledgeDuplicate(existing.get(), request);
         }
 
         Event created = new Event(request.eventId(), request.accountId(), request.type(), request.amount(),
@@ -61,12 +53,31 @@ public class EventService {
         } catch (DataIntegrityViolationException ex) {
             // lost a race with a concurrent identical submission; treat it as a duplicate of whatever landed first
             Event raced = eventRepository.findByEventId(request.eventId()).orElseThrow(() -> ex);
-            if (raced.getStatus() == EventStatus.PROCESSED) {
-                meterRegistry.counter("events.duplicate").increment();
-                return EventResponse.from(raced, true);
-            }
-            return process(raced, true);
+            return retryOrAcknowledgeDuplicate(raced, request);
         }
+    }
+
+    private EventResponse retryOrAcknowledgeDuplicate(Event event, EventRequest request) {
+        if (!matchesPayload(event, request)) {
+            throw new ConflictingDuplicateException(event.getEventId());
+        }
+        if (event.getStatus() == EventStatus.PROCESSED) {
+            meterRegistry.counter("events.duplicate").increment();
+            log.info("duplicate event received eventId={} accountId={}", event.getEventId(), event.getAccountId());
+            return EventResponse.from(event, true);
+        }
+        // status is PENDING or FAILED: the transaction was never confirmed as applied, retry it
+        log.info("retrying unresolved event eventId={} accountId={} previousStatus={}",
+                event.getEventId(), event.getAccountId(), event.getStatus());
+        return process(event, true);
+    }
+
+    private static boolean matchesPayload(Event event, EventRequest request) {
+        return event.getAccountId().equals(request.accountId())
+                && event.getType() == request.type()
+                && event.getAmount().compareTo(request.amount()) == 0
+                && event.getCurrency().equals(request.currency())
+                && event.getEventTimestamp().equals(request.eventTimestamp());
     }
 
     private EventResponse process(Event event, boolean duplicate) {
@@ -78,6 +89,13 @@ public class EventService {
             log.info("event applied eventId={} accountId={}", event.getEventId(), event.getAccountId());
             return EventResponse.from(event, duplicate);
         } catch (AccountServiceUnavailableException ex) {
+            // A concurrent retry for this same eventId may have already processed it while this
+            // call was in flight; never let a failed retry downgrade an already-PROCESSED event.
+            Event latest = eventRepository.findByEventId(event.getEventId()).orElse(event);
+            if (latest.getStatus() == EventStatus.PROCESSED) {
+                log.info("eventId {} was processed concurrently; not downgrading to FAILED", event.getEventId());
+                return EventResponse.from(latest, duplicate);
+            }
             event.markFailed(ex.getMessage(), Instant.now());
             eventRepository.save(event);
             meterRegistry.counter("events.failed", "reason", "account_service_unavailable").increment();
